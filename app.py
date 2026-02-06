@@ -2,93 +2,78 @@ import streamlit as st
 import os
 import io
 from groq import Groq
-from fpdf import FPDF
+from PyPDF2 import PdfReader # مكتبة جديدة لقراءة الـ PDF
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# 1. إعدادات الصفحة
 st.set_page_config(page_title="مساعد الصيدلة الذكي Pro", page_icon="💊", layout="wide")
-st.title("🎯 منصة استخراج 'زتونة' المحاضرات الصيدلانية")
+st.title("🎙️+📄 الربط الذكي بين الصوت وملف المحاضرة")
 
-# --- عداد الاستهلاك الموحد ---
-if 'used_seconds' not in st.session_state:
-    st.session_state.used_seconds = 0
-
-total_limit_seconds = 7200 * 4 # 8 ساعات إجمالية للأربعة حسابات
-remaining_seconds = max(0, total_limit_seconds - st.session_state.used_seconds)
-
-st.sidebar.header("📊 رصيد الموقع المتبقي")
-progress = min(st.session_state.used_seconds / total_limit_seconds, 1.0)
-st.sidebar.progress(progress)
-st.sidebar.write(f"🔓 المتبقي: {remaining_seconds / 3600:.2f} ساعة")
-
-# 2. جلب مفاتيح API
-api_keys = [
-    st.secrets.get("groq_api_key_1"),
-    st.secrets.get("groq_api_key_2"),
-    st.secrets.get("groq_api_key_3"),
-    st.secrets.get("groq_api_key_4")
-]
+# 1. جلب مفاتيح API (الـ 4 حسابات)
+api_keys = [st.secrets.get(f"groq_api_key_{i}") for i in range(1, 5)]
 api_keys = [k for k in api_keys if k]
 
-if not api_keys:
-    st.error("⚠️ تأكد من إضافة 4 مفاتيح في Secrets.")
-    st.stop()
+# 2. واجهة الرفع المزدوجة
+col1, col2 = st.columns(2)
+with col1:
+    audio_file = st.file_uploader("🎙️ ارفع تسجيل المحاضرة", type=["mp3", "wav", "m4a"])
+with col2:
+    pdf_file = st.file_uploader("📄 ارفع ملف المحاضرة (PDF)", type=["pdf"])
 
-# 3. المعالجة
-uploaded_file = st.file_uploader("ارفع ملف المحاضرة", type=["mp3", "wav", "m4a"])
-
-if uploaded_file:
-    file_bytes = uploaded_file.read()
-    
-    if st.button("🚀 استخراج النقاط الهامة"):
-        raw_text = ""
+if audio_file and pdf_file:
+    if st.button("🚀 بدء الربط والتحليل الذكي"):
+        # أ. قراءة نص الـ PDF ليكون مرجعاً
+        pdf_reader = PdfReader(pdf_file)
+        pdf_context = ""
+        for page in pdf_reader.pages:
+            pdf_context += page.extract_text()
+        
+        # ب. تفريغ الصوت (Whisper)
+        raw_audio_text = ""
+        audio_bytes = audio_file.read()
         success_client = None
         
         for i, key in enumerate(api_keys):
             try:
                 client = Groq(api_key=key)
-                with st.spinner(f"جاري قراءة المحاضرة (حساب {i+1})..."):
+                with st.spinner(f"جاري تحويل الصوت باستخدام حساب {i+1}..."):
                     transcription = client.audio.transcriptions.create(
                         model="whisper-large-v3",
-                        file=(uploaded_file.name, io.BytesIO(file_bytes)),
+                        file=(audio_file.name, io.BytesIO(audio_bytes)),
                         language="ar",
-                        prompt="Keep Egyptian slang. Focus on medical terms: Pharmacology, Dosage, Mechanism."
+                        prompt=f"Context terms: {pdf_context[:500]}" # إرسال نبذة من الـ PDF لتحسين التعرف
                     )
-                    raw_text = transcription.text
+                    raw_audio_text = transcription.text
                     success_client = client
-                    st.session_state.used_seconds += 3600 # خصم ساعة من العداد
-                    break 
+                    break
             except Exception as e:
                 if "rate_limit_exceeded" in str(e): continue
-                else: st.error(f"❌ خطأ: {e}"); st.stop()
-        
-        if raw_text:
+                else: st.error(f"خطأ: {e}"); st.stop()
+
+        # ج. الربط والذكاء الاصطناعي (Llama)
+        if raw_audio_text and success_client:
             try:
-                with st.spinner("جاري فلترة الكلام واستخراج ما ركز عليه الدكتور..."):
-                    focus_prompt = f"""
-                    أنت صيدلي خبير. استخرج من هذا التفريغ الأجزاء المهمة فقط:
-                    1- ركز على الجمل التي تبدأ بـ (مهم، ركزوا، هييجي في الامتحان، النقطة دي أساسية).
-                    2- استخرج أسماء الأدوية المذكورة بالإنجليزية (English Script).
-                    3- لخص الـ Mechanism والـ Side effects التي شرحها الدكتور بعمق.
-                    4- تجاهل أي رغي جانبي أو حكايات خارج المنهج.
+                with st.spinner("جاري مطابقة الصوت مع ملف الـ PDF لتصحيح المصطلحات..."):
+                    correlation_prompt = f"""
+                    أنت صيدلي خبير. لديك نصين لنفس المحاضرة:
+                    1. نص مرجعي دقيق (من ملف PDF): {pdf_context[:5000]}
+                    2. نص مفرغ من صوت الدكتور (قد يحتوي أخطاء): {raw_audio_text}
                     
-                    التفريغ: {raw_text[:15000]}
+                    المطلوب:
+                    - قم بتصحيح النص المفرغ من الصوت باستخدام المصطلحات الدقيقة الموجودة في الـ PDF.
+                    - اكتب المصطلحات الطبية بالإنجليزية كما وردت في الـ PDF.
+                    - لخص أهم النقاط التي شرحها الدكتور زيادة عن الموجود في الملف (الزيادات العلمية).
+                    - حافظ على روح العامية المصرية في الأجزاء التوضيحية.
                     """
                     completion = success_client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
-                        messages=[{"role": "user", "content": focus_prompt}]
+                        messages=[{"role": "user", "content": correlation_prompt}]
                     )
-                    refined_output = completion.choices[0].message.content
+                    final_output = completion.choices[0].message.content
 
-                st.success("🎯 تم استخراج أهم نقاط المحاضرة!")
-                
-                # عرض النتائج
-                tab1, tab2 = st.tabs(["📝 أهم النقاط (الزتونة)", "📄 التفريغ الكامل"])
-                with tab1:
-                    st.info(refined_output)
-                with tab2:
-                    st.write(raw_text)
+                st.success("✅ تم الربط وتصحيح النص بنجاح!")
+                st.markdown("### 🎯 النتيجة النهائية (المصححة مرجعياً):")
+                st.info(final_output)
 
             except Exception as e:
-                st.error(f"حدث خطأ في التحليل: {e}")
+                st.error(f"خطأ في الربط: {e}")
